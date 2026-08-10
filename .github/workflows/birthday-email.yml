@@ -1,0 +1,30 @@
+name: Kirim Ucapan Ulang Tahun Harian
+
+on:
+  schedule:
+    # Cek setiap 1 jam sekali (menit ke-0). Jam pengiriman ditentukan dari Google Sheets.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}   # tombol "Run workflow" manual di tab Actions, buat testing
+
+jobs:
+  send-birthday-emails:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan pengecekan & pengiriman ulang tahun
+        env:
+          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          CC_EMAILS: ${{ secrets.CC_EMAILS }}
+        run: python send_birthday_emails.py
