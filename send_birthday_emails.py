@@ -15,12 +15,13 @@ Environment variables yang dibutuhkan (diisi lewat GitHub Actions Secrets):
     SHEET_CSV_URL     -> link "Publish to web" Google Sheets dalam format CSV
     GMAIL_ADDRESS     -> email pengirim, mis. your-email@gmail.com
     GMAIL_APP_PASSWORD-> App Password 16 digit dari akun Gmail tsb
-    CC_EMAILS         -> (opsional) daftar email CC dipisah koma
+    CC_EMAILS         -> (opsional) daftar email CC broadcast dipisah koma
 """
 
 import argparse
 import os
 import smtplib
+import socket
 import sys
 from datetime import datetime
 from email.mime.image import MIMEImage
@@ -76,7 +77,17 @@ def load_employee_data(sheet_csv_url: str) -> tuple[pd.DataFrame, int]:
     """Ambil data dari Google Sheets (link publish CSV). Kolom wajib: NOPEG, NAMA, UNIT, JABATAN, TANGGAL LAHIR, EMAIL.
     Mengembalikan (df_karyawan, target_hour).
     """
-    df_raw = pd.read_csv(sheet_csv_url)
+    import io
+    import urllib.request
+
+    req = urllib.request.Request(
+        sheet_csv_url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        content = response.read()
+
+    df_raw = pd.read_csv(io.BytesIO(content))
     df_raw.columns = [c.strip().upper() for c in df_raw.columns]
 
     target_hour = extract_send_hour(df_raw)
@@ -99,16 +110,16 @@ def find_todays_birthdays(df: pd.DataFrame, today: datetime) -> pd.DataFrame:
     return df[mask]
 
 
-def build_email(name: str, to_email: str, cc_emails: list, from_email: str, card_path: str) -> MIMEMultipart:
+def build_email(name: str, to_email: str, cc_emails: list[str], from_email: str, card_path: str) -> MIMEMultipart:
+    """Membangun 1 pesan email ucapan untuk 1 orang yang berulang tahun."""
     msg = MIMEMultipart("related")
     msg["Subject"] = f"Selamat Ulang Tahun, {name.title()}!"
-    msg["From"] = f"Cabin Line Maintenance Services<{from_email}>"
+    msg["From"] = f"Cabin Line Services<{from_email}>"
     msg["To"] = to_email
     if cc_emails:
         msg["Cc"] = ", ".join(cc_emails)
 
-    # Plain text alternative (untuk email client yang tidak support HTML & anti-spam)
-    plain_text = f"Selamat Ulang Tahun! Kartu ucapan terlampir."
+    plain_text = f"Selamat Ulang Tahun, {name.title()}! Kartu ucapan terlampir."
 
     html = f"""\
     <html>
@@ -120,7 +131,6 @@ def build_email(name: str, to_email: str, cc_emails: list, from_email: str, card
     </html>
     """
 
-    # Struktur: related > alternative > (plain + html) + image
     alt_part = MIMEMultipart("alternative")
     alt_part.attach(MIMEText(plain_text, "plain"))
     alt_part.attach(MIMEText(html, "html"))
@@ -135,11 +145,18 @@ def build_email(name: str, to_email: str, cc_emails: list, from_email: str, card
     return msg
 
 
-def send_email(msg: MIMEMultipart, from_email: str, app_password: str, to_email: str, cc_emails: list):
+def send_email(msg: MIMEMultipart, from_email: str, app_password: str, to_email: str, cc_emails: list[str]):
     all_recipients = [to_email] + cc_emails
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(from_email, app_password)
-        server.sendmail(from_email, all_recipients, msg.as_string())
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(from_email, app_password)
+            server.sendmail(from_email, all_recipients, msg.as_string())
+    except (socket.timeout, TimeoutError, smtplib.SMTPConnectError, OSError):
+        # Fallback ke port 587 STARTTLS jika port 465 diblokir jaringan WiFi/kantor
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+            server.starttls()
+            server.login(from_email, app_password)
+            server.sendmail(from_email, all_recipients, msg.as_string())
 
 
 def main():
@@ -161,6 +178,8 @@ def main():
 
     if args.no_cc:
         cc_emails = []
+    elif args.force_cc:
+        cc_emails = [e.strip() for e in args.force_cc.split(",") if e.strip()]
     else:
         cc_emails = [e.strip() for e in os.environ.get("CC_EMAILS", "").split(",") if e.strip()]
 
@@ -175,89 +194,82 @@ def main():
             print(f"Peringatan: Gagal memuat data Google Sheet: {e}", file=sys.stderr)
 
     if args.force_name or args.force_email:
-        nopeg = args.force_nopeg or ""
-        unit = args.force_unit or ""
-        jabatan = args.force_jabatan or ""
-        target_email = args.force_email
-        name = args.force_name or ""
+        # Multi-target setup
+        names = [n.strip() for n in args.force_name.split(";")] if args.force_name else ["TEST USER"]
+        emails = [e.strip() for e in args.force_email.split(";")] if args.force_email else [None] * len(names)
 
-        if df is not None:
-            match = pd.DataFrame()
-            if target_email:
-                target_email_lower = target_email.strip().lower()
-                match = df[df["EMAIL"].astype(str).str.strip().str.lower() == target_email_lower]
-                # Jika tidak persis match, coba partial match (misal ivanedsr vs ivnedsr)
-                if match.empty:
-                    match = df[df["EMAIL"].astype(str).str.strip().str.lower().str.contains("edsr", na=False)]
+        all_sheet_emails = []
+        if df is not None and "EMAIL" in df.columns:
+            all_sheet_emails = [
+                str(e).strip() for e in df["EMAIL"].dropna().unique()
+                if str(e).strip() and "@" in str(e)
+            ]
 
-            if match.empty and name:
-                match = df[df["NAMA"].astype(str).str.strip().str.upper() == name.strip().upper()]
+        for name, target_email in zip(names, emails):
+            nopeg = args.force_nopeg or "123456"
+            unit = args.force_unit or "JKTTNP-2"
+            jabatan = args.force_jabatan or "STAFF"
 
-            if not match.empty:
-                row = match.iloc[0]
-                if not name:
-                    name = str(row.get("NAMA", "")).strip()
-                if not nopeg:
-                    nopeg = str(row.get("NOPEG", "")).strip()
-                if not unit:
-                    unit = str(row.get("UNIT", "")).strip()
-                if not jabatan:
-                    jabatan = str(row.get("JABATAN", "")).strip()
-                if not target_email:
-                    target_email = str(row.get("EMAIL", "")).strip()
-                print(f"Ditemukan di Sheet: {name} (NOPEG: {nopeg}, UNIT: {unit}, JABATAN: {jabatan}) -> {target_email}")
+            if df is not None:
+                match = pd.DataFrame()
+                if target_email:
+                    target_email_lower = target_email.strip().lower()
+                    match = df[df["EMAIL"].astype(str).str.strip().str.lower() == target_email_lower]
+                
+                if match.empty and name:
+                    match = df[df["NAMA"].astype(str).str.strip().str.upper() == name.strip().upper()]
+
+                if not match.empty:
+                    row = match.iloc[0]
+                    name = str(row.get("NAMA", name)).strip()
+                    nopeg = str(row.get("NOPEG", nopeg)).strip()
+                    unit = str(row.get("UNIT", unit)).strip()
+                    jabatan = str(row.get("JABATAN", jabatan)).strip()
+                    target_email = str(row.get("EMAIL", target_email)).strip()
+                    print(f"Ditemukan di Sheet: {name} (NOPEG: {nopeg}, UNIT: {unit}, JABATAN: {jabatan}) -> {target_email}")
+                else:
+                    print(f"Peringatan: Data tidak ditemukan di Sheet untuk name='{name}' email='{target_email}', menggunakan detail fallback.")
+
+            card_path = generate_card(
+                name=name,
+                output_path=os.path.join(OUTPUT_DIR, f"{name.replace(' ', '_')}_test.jpg"),
+                nopeg=nopeg,
+                unit=unit,
+                jabatan=jabatan
+            )
+            print(f"Kartu dibuat: {card_path}")
+
+            if args.dry_run:
+                print(f"   [dry-run] Email tidak dikirim untuk {name}.")
+                continue
+
+            if not target_email:
+                print(f"Butuh email untuk {name}.")
+                continue
+
+            # CC list: hilangkan email penerima utama agar dia tidak menerima CC emailnya sendiri
+            if args.no_cc:
+                cc_list = []
+            elif cc_emails:
+                cc_list = [c for c in cc_emails if c.lower() != target_email.lower()]
             else:
-                print(f"Peringatan: Data tidak ditemukan di Sheet untuk name='{name}' email='{target_email}', menggunakan detail fallback.")
+                cc_list = [c for c in all_sheet_emails if c.lower() != target_email.lower()]
 
-        # Fallback default untuk testing jika tidak ada di sheet & tidak diisi di CLI
-        if not name:
-            name = "TEST USER"
-        if not nopeg:
-            nopeg = "123456"
-        if not unit:
-            unit = "JKTTNP-2"
-        if not jabatan:
-            jabatan = "STAFF"
-
-        card_path = generate_card(
-            name=name,
-            output_path=os.path.join(OUTPUT_DIR, "force_test.jpg"),
-            nopeg=nopeg,
-            unit=unit,
-            jabatan=jabatan
-        )
-        print(f"Kartu dibuat: {card_path}")
-        if args.dry_run:
-            print("--dry-run aktif, email tidak dikirim.")
-            return
-        if not target_email:
-            print("Butuh --force-email atau email terdaftar di Sheet untuk mengirim.")
-            return
-        if not from_email or not app_password:
-            print("ERROR: GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diset.", file=sys.stderr)
-            sys.exit(1)
-
-        if args.force_cc:
-            cc_list = [e.strip() for e in args.force_cc.split(",") if e.strip()]
-        elif args.no_cc:
-            cc_list = []
-        else:
-            cc_list = cc_emails
-        try:
-            msg = build_email(name, target_email, cc_list, from_email, card_path)
-            send_email(msg, from_email, app_password, target_email, cc_list)
-            print(f"Email test terkirim ke {target_email} (CC: {cc_list})")
-        finally:
-            if os.path.exists(card_path):
-                os.remove(card_path)
-                print(f"   Kartu dibersihkan: {card_path}")
+            try:
+                msg = build_email(name, target_email, cc_list, from_email, card_path)
+                send_email(msg, from_email, app_password, target_email, cc_list)
+                print(f"Email terkirim ke {target_email} (CC: {cc_list})")
+            finally:
+                if os.path.exists(card_path):
+                    os.remove(card_path)
         return
 
     if df is None:
         if not sheet_csv_url:
             print("ERROR: environment variable SHEET_CSV_URL belum diset.", file=sys.stderr)
-            sys.exit(1)
-        df, target_hour = load_employee_data(sheet_csv_url)
+        else:
+            print("ERROR: Gagal memuat data dari Google Sheets. Pastikan koneksi internet aktif dan link CSV dapat diakses.", file=sys.stderr)
+        sys.exit(1)
 
     today = today_jakarta()
     current_hour = today.hour
@@ -274,15 +286,22 @@ def main():
         print("Tidak ada yang berulang tahun hari ini.")
         return
 
-    # Ambil semua email non-birthday sebagai CC dinamis (jika tidak --no-cc)
+    all_sheet_emails = []
+    if df is not None and "EMAIL" in df.columns:
+        all_sheet_emails = [
+            str(e).strip() for e in df["EMAIL"].dropna().unique()
+            if str(e).strip() and "@" in str(e)
+        ]
+
+    # Gunakan email CC yang didefinisikan di environment variable (broadcast), atau default semua email di Sheet
     if args.no_cc:
-        all_cc = []
+        base_cc = []
+    elif cc_emails:
+        base_cc = cc_emails
+        print(f"   CC (custom/env): {base_cc}")
     else:
-        non_birthday_mask = ~df.index.isin(birthdays.index)
-        dynamic_cc = [str(e).strip() for e in df.loc[non_birthday_mask, "EMAIL"] if pd.notna(e) and str(e).strip()]
-        all_cc = list(dict.fromkeys(dynamic_cc + cc_emails))  # deduplicate, preserve order
-        print(f"   CC dinamis dari Sheet: {dynamic_cc}")
-        print(f"   CC total (termasuk env): {all_cc}")
+        base_cc = all_sheet_emails
+        print(f"   CC (semua karyawan di Sheet): {len(base_cc)} email")
 
     for _, row in birthdays.iterrows():
         name = str(row["NAMA"]).strip()
@@ -292,9 +311,6 @@ def main():
         to_email = str(row["EMAIL"]).strip()
         print(f"-> Ulang tahun hari ini: {name} (NOPEG: {nopeg}, UNIT: {unit}, JABATAN: {jabatan}) ({to_email})")
 
-        # Hapus email birthday person dari CC list supaya tidak CC ke diri sendiri
-        cc_for_this = [e for e in all_cc if e.lower() != to_email.lower()] if not args.no_cc else []
-
         safe_filename = "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
         card_path = generate_card(
             name=name,
@@ -303,6 +319,9 @@ def main():
             unit=unit,
             jabatan=jabatan
         )
+
+        # Hapus email penerima dari CC agar penerima tidak kena CC kartunya sendiri
+        cc_for_this = [c for c in base_cc if c.lower() != to_email.lower()]
 
         if args.dry_run:
             print(f"   [dry-run] Kartu dibuat di {card_path}, email TIDAK dikirim.")

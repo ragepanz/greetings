@@ -60,12 +60,13 @@ tambahkan 4 secret ini:
 | `SHEET_CSV_URL`       | Link CSV dari langkah 1.3                                        |
 | `GMAIL_ADDRESS`       | Email Gmail pengirim                                              |
 | `GMAIL_APP_PASSWORD`  | 16 digit App Password dari langkah 2.3 (tanpa spasi)              |
-| `CC_EMAILS`           | (opsional) email yang mau di-CC, pisahkan koma jika lebih dari satu|
+| `CC_EMAILS`           | Email CC broadcast, mis. `list-Tn@gmf-aeroasia.co.id`              |
 
 ### 5. Selesai — sistem otomatis berjalan tiap hari
 
 GitHub Actions akan otomatis bangun setiap hari, cek Google Sheets, dan kirim
-email ke siapa pun yang ulang tahun hari itu. Tidak perlu PC nyala 24 jam,
+email ke siapa pun yang ulang tahun hari itu. Email dikirim ke karyawan tersebut
+sebagai penerima utama, dengan `CC_EMAILS` sebagai alamat broadcast. Tidak perlu PC nyala 24 jam,
 tidak perlu server, 100% gratis.
 
 ## Cara tes lokal
@@ -76,6 +77,7 @@ Set environment variables dulu (jalankan 1x setiap buka terminal baru):
 $env:GMAIL_ADDRESS="your-email@gmail.com"
 $env:GMAIL_APP_PASSWORD="xxxxxxxxxxxxxxxx"
 $env:SHEET_CSV_URL="https://docs.google.com/.../pub?output=csv"
+$env:CC_EMAILS="list-Tn@gmf-aeroasia.co.id"
 ```
 
 ### Kirim langsung ke 1 orang (testing tanpa CC)
