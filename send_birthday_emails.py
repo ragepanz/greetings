@@ -19,6 +19,7 @@ Environment variables yang dibutuhkan (diisi lewat GitHub Actions Secrets):
 """
 
 import argparse
+import json
 import os
 import smtplib
 import socket
@@ -44,8 +45,36 @@ from generate_card import generate_card
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+SENT_TRACKER_FILE = os.path.join(BASE_DIR, "sent_today.json")
 
 REQUIRED_COLUMNS = ["NOPEG", "NAMA", "UNIT", "JABATAN", "TANGGAL LAHIR", "EMAIL"]
+
+
+def load_sent_tracker(today_str: str) -> list[str]:
+    """Membaca daftar identifier (nama/email) yang sudah terkirim hari ini.
+    Jika tanggal di file berbeda dengan today_str, otomatis reset list (hari baru).
+    """
+    if os.path.exists(SENT_TRACKER_FILE):
+        try:
+            with open(SENT_TRACKER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today_str:
+                return data.get("sent", [])
+        except Exception as e:
+            print(f"Peringatan: Gagal membaca {SENT_TRACKER_FILE}: {e}")
+    return []
+
+
+def mark_as_sent(today_str: str, identifier: str):
+    """Menandai nama/email sebagai sudah terkirim hari ini dan menyimpannya ke sent_today.json."""
+    sent_list = load_sent_tracker(today_str)
+    if identifier not in sent_list:
+        sent_list.append(identifier)
+    try:
+        with open(SENT_TRACKER_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": today_str, "sent": sent_list}, f, indent=2)
+    except Exception as e:
+        print(f"Peringatan: Gagal menyimpan ke {SENT_TRACKER_FILE}: {e}")
 
 
 def today_jakarta() -> datetime:
@@ -304,13 +333,25 @@ def main():
         base_cc = all_sheet_emails
         print(f"   CC (semua karyawan di Sheet): {len(base_cc)} email")
 
+    today_str = today.strftime("%Y-%m-%d")
+    sent_list = load_sent_tracker(today_str)
+
     for _, row in birthdays.iterrows():
         name = str(row["NAMA"]).strip()
         nopeg = str(row.get("NOPEG", "")).strip()
         unit = str(row.get("UNIT", "")).strip()
         jabatan = str(row.get("JABATAN", "")).strip()
         to_email = str(row["EMAIL"]).strip()
+        
+        # Unique identifier per employee (kombinasi NOPEG atau Email atau Nama)
+        identifier = nopeg if nopeg else to_email.lower()
+
         print(f"-> Ulang tahun hari ini: {name} (NOPEG: {nopeg}, UNIT: {unit}, JABATAN: {jabatan}) ({to_email})")
+
+        # Cek apakah sudah terkirim hari ini
+        if not args.ignore_schedule and identifier in sent_list:
+            print(f"   [SKIP] Ucapan untuk {name} ({to_email}) sudah terkirim hari ini ({today_str}).")
+            continue
 
         safe_filename = "".join(c for c in name if c.isalnum() or c in " _-").strip().replace(" ", "_")
         card_path = generate_card(
@@ -337,6 +378,9 @@ def main():
             msg = build_email(name, to_email, cc_for_this, from_email, card_path)
             send_email(msg, from_email, app_password, to_email, cc_for_this)
             print(f"   Email terkirim ke {to_email} (CC: {cc_for_this})")
+            # Catat ke sent_today.json agar tidak dikirim ulang pada jam berikutnya
+            mark_as_sent(today_str, identifier)
+            sent_list.append(identifier)
         finally:
             if os.path.exists(card_path):
                 os.remove(card_path)
