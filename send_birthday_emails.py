@@ -33,9 +33,10 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Baca .env file (kalau ada)
 
+TZ_NAME = os.getenv("TIMEZONE", os.getenv("APP_TIMEZONE", "Asia/Jakarta"))
 try:
     from zoneinfo import ZoneInfo
-    JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
+    JAKARTA_TZ = ZoneInfo(TZ_NAME)
 except Exception:  # pragma: no cover
     JAKARTA_TZ = None
 
