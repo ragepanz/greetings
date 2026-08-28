@@ -27,4 +27,4 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           CC_EMAILS: ${{ secrets.CC_EMAILS }}
-        run: python send_birthday_emails.py
+        run: python send_birthday_emails.py --ignore-schedule
